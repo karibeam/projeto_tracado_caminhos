@@ -1,0 +1,206 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Iterable, Optional
+
+import glm
+
+from utils import EPSILON, vec3
+
+
+@dataclass(slots=True)
+class Ray:
+    origin: glm.vec3
+    direction: glm.vec3
+
+    def at(self, t: float) -> glm.vec3:
+        return self.origin + t * self.direction
+
+
+@dataclass(slots=True)
+class HitRecord:
+    p: glm.vec3
+    normal: glm.vec3
+    t: float
+    front_face: bool
+    material: Any
+    u: float = 0.0
+    v: float = 0.0
+
+
+def _set_face_normal(ray: Ray, outward_normal: glm.vec3) -> tuple[bool, glm.vec3]:
+    front_face = glm.dot(ray.direction, outward_normal) < 0.0
+    normal = outward_normal if front_face else -outward_normal
+    return front_face, normal
+
+
+class Hittable:
+    def hit(self, ray: Ray, t_min: float, t_max: float) -> Optional[HitRecord]:
+        raise NotImplementedError
+
+
+@dataclass(slots=True)
+class Sphere(Hittable):
+    center: glm.vec3
+    radius: float
+    material: Any
+
+    def hit(self, ray: Ray, t_min: float, t_max: float) -> Optional[HitRecord]:
+        oc = ray.origin - self.center
+        a = glm.dot(ray.direction, ray.direction)
+        half_b = glm.dot(oc, ray.direction)
+        c = glm.dot(oc, oc) - self.radius * self.radius
+        discriminant = half_b * half_b - a * c
+        if discriminant < 0.0:
+            return None
+        root = discriminant ** 0.5
+        temp = (-half_b - root) / a
+        if temp < t_min or temp > t_max:
+            temp = (-half_b + root) / a
+            if temp < t_min or temp > t_max:
+                return None
+        p = ray.at(temp)
+        outward = (p - self.center) / self.radius
+        front_face, normal = _set_face_normal(ray, outward)
+        return HitRecord(p=p, normal=normal, t=temp, front_face=front_face, material=self.material)
+
+
+@dataclass(slots=True)
+class Quad(Hittable):
+    origin: glm.vec3
+    u: glm.vec3
+    v: glm.vec3
+    material: Any
+
+    def __post_init__(self) -> None:
+        self.normal = glm.normalize(glm.cross(self.u, self.v))
+        self.area = glm.length(glm.cross(self.u, self.v))
+        self.u_len2 = glm.dot(self.u, self.u)
+        self.v_len2 = glm.dot(self.v, self.v)
+
+    def sample_point(self, rng) -> tuple[glm.vec3, glm.vec3, float]:
+        su = rng.random()
+        sv = rng.random()
+        point = self.origin + su * self.u + sv * self.v
+        pdf_area = 1.0 / max(self.area, 1e-8)
+        return point, self.normal, pdf_area
+
+    def hit(self, ray: Ray, t_min: float, t_max: float) -> Optional[HitRecord]:
+        denom = glm.dot(ray.direction, self.normal)
+        if abs(denom) < 1e-8:
+            return None
+        t = glm.dot(self.origin - ray.origin, self.normal) / denom
+        if t < t_min or t > t_max:
+            return None
+        p = ray.at(t)
+        rel = p - self.origin
+        u_coord = glm.dot(rel, self.u) / self.u_len2
+        v_coord = glm.dot(rel, self.v) / self.v_len2
+        if u_coord < 0.0 or u_coord > 1.0 or v_coord < 0.0 or v_coord > 1.0:
+            return None
+        front_face, normal = _set_face_normal(ray, self.normal)
+        return HitRecord(p=p, normal=normal, t=t, front_face=front_face, material=self.material, u=u_coord, v=v_coord)
+
+
+@dataclass(slots=True)
+class Box(Hittable):
+    minimum: glm.vec3
+    maximum: glm.vec3
+    material: Any
+
+    def __post_init__(self) -> None:
+        minp = self.minimum
+        maxp = self.maximum
+        dx = vec3(maxp.x - minp.x, 0.0, 0.0)
+        dy = vec3(0.0, maxp.y - minp.y, 0.0)
+        dz = vec3(0.0, 0.0, maxp.z - minp.z)
+        self.sides = [
+            Quad(vec3(minp.x, minp.y, minp.z), dx, dy, self.material),
+            Quad(vec3(minp.x, minp.y, minp.z), dx, dz, self.material),
+            Quad(vec3(minp.x, minp.y, minp.z), dy, dz, self.material),
+            Quad(vec3(maxp.x, minp.y, minp.z), dy, dz, self.material),
+            Quad(vec3(minp.x, maxp.y, minp.z), dx, dz, self.material),
+            Quad(vec3(minp.x, minp.y, maxp.z), dx, dy, self.material),
+        ]
+
+    def hit(self, ray: Ray, t_min: float, t_max: float) -> Optional[HitRecord]:
+        closest = t_max
+        result = None
+        for side in self.sides:
+            hit = side.hit(ray, t_min, closest)
+            if hit is not None and hit.t < closest:
+                closest = hit.t
+                result = hit
+        return result
+
+
+class Scene(Hittable):
+    def __init__(self, objects: Iterable[Hittable], ambient: glm.vec3) -> None:
+        self.objects = list(objects)
+        self.ambient = ambient
+
+    def hit(self, ray: Ray, t_min: float, t_max: float) -> Optional[HitRecord]:
+        closest = t_max
+        result = None
+        for obj in self.objects:
+            hit = obj.hit(ray, t_min, closest)
+            if hit is not None and hit.t < closest:
+                closest = hit.t
+                result = hit
+        return result
+
+
+@dataclass(slots=True)
+class AreaLight:
+    quad: Quad
+    emission: glm.vec3
+
+    @property
+    def area(self) -> float:
+        return self.quad.area
+
+    @property
+    def normal(self) -> glm.vec3:
+        return self.quad.normal
+
+    def sample(self, rng) -> tuple[glm.vec3, glm.vec3, float, glm.vec3]:
+        point, normal, pdf_area = self.quad.sample_point(rng)
+        return point, normal, pdf_area, self.emission
+
+    def pdf_from(self, point: glm.vec3, target: glm.vec3) -> float:
+        direction = target - point
+        dist2 = glm.dot(direction, direction)
+        if dist2 <= 0.0:
+            return 0.0
+        direction = glm.normalize(direction)
+        cos_light = max(0.0, glm.dot(-direction, self.normal))
+        if cos_light <= 0.0:
+            return 0.0
+        return dist2 / (cos_light * self.area)
+
+
+def build_cornell_box() -> tuple[Scene, AreaLight, list[Hittable]]:
+    from materials import EmissiveMaterial, LambertianMaterial, MicrofacetMaterial
+
+    white = LambertianMaterial(vec3(0.73, 0.73, 0.73))
+    red = LambertianMaterial(vec3(0.65, 0.05, 0.05))
+    green = LambertianMaterial(vec3(0.12, 0.45, 0.15))
+    metal_plastic = MicrofacetMaterial(base_color=vec3(0.82, 0.79, 0.75), metallic=0.85, roughness=0.2)
+    plastic = MicrofacetMaterial(base_color=vec3(0.18, 0.35, 0.7), metallic=0.0, roughness=0.55)
+    light_material = EmissiveMaterial(vec3(15.0, 15.0, 15.0))
+
+    floor = Quad(vec3(0.0, 0.0, 0.0), vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), white)
+    ceiling = Quad(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), white)
+    back = Quad(vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), white)
+    left_wall = Quad(vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0), red)
+    right_wall = Quad(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0), green)
+
+    light_quad = Quad(vec3(0.34, 0.999, 0.34), vec3(0.32, 0.0, 0.0), vec3(0.0, 0.0, 0.32), light_material)
+    area_light = AreaLight(quad=light_quad, emission=vec3(15.0, 15.0, 15.0))
+
+    sphere = Sphere(vec3(0.33, 0.22, 0.35), 0.22, metal_plastic)
+    box = Box(vec3(0.62, 0.0, 0.55), vec3(0.88, 0.55, 0.82), plastic)
+
+    objects = [floor, ceiling, back, left_wall, right_wall, light_quad, sphere, box]
+    scene = Scene(objects, ambient=vec3(0.015, 0.015, 0.018))
+    return scene, area_light, [sphere, box]
