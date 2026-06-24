@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Iterable, Optional
 
 import glm
@@ -37,6 +38,68 @@ def _set_face_normal(ray: Ray, outward_normal: glm.vec3) -> tuple[bool, glm.vec3
 class Hittable:
     def hit(self, ray: Ray, t_min: float, t_max: float) -> Optional[HitRecord]:
         raise NotImplementedError
+
+
+@dataclass(slots=True)
+class Translated(Hittable):
+    hittable: Hittable
+    offset: glm.vec3
+
+    def hit(self, ray: Ray, t_min: float, t_max: float) -> Optional[HitRecord]:
+        moved_ray = Ray(ray.origin - self.offset, ray.direction)
+        hit = self.hittable.hit(moved_ray, t_min, t_max)
+        if hit is None:
+            return None
+        return HitRecord(
+            p=hit.p + self.offset,
+            normal=hit.normal,
+            t=hit.t,
+            front_face=hit.front_face,
+            material=hit.material,
+            u=hit.u,
+            v=hit.v,
+        )
+
+
+@dataclass(slots=True)
+class RotateY(Hittable):
+    hittable: Hittable
+    angle_degrees: float
+
+    def __post_init__(self) -> None:
+        radians = glm.radians(self.angle_degrees)
+        self.sin_theta = math.sin(radians)
+        self.cos_theta = math.cos(radians)
+
+    def _rotate_point(self, point: glm.vec3, inverse: bool = False) -> glm.vec3:
+        if inverse:
+            x = self.cos_theta * point.x + self.sin_theta * point.z
+            z = -self.sin_theta * point.x + self.cos_theta * point.z
+        else:
+            x = self.cos_theta * point.x - self.sin_theta * point.z
+            z = self.sin_theta * point.x + self.cos_theta * point.z
+        return vec3(x, point.y, z)
+
+    def hit(self, ray: Ray, t_min: float, t_max: float) -> Optional[HitRecord]:
+        rotated_origin = self._rotate_point(ray.origin, inverse=True)
+        rotated_direction = self._rotate_point(ray.direction, inverse=True)
+        rotated_ray = Ray(rotated_origin, rotated_direction)
+        hit = self.hittable.hit(rotated_ray, t_min, t_max)
+        if hit is None:
+            return None
+
+        world_p = self._rotate_point(hit.p)
+        world_normal = glm.normalize(self._rotate_point(hit.normal))
+        front_face, normal = _set_face_normal(ray, world_normal)
+        return HitRecord(
+            p=world_p,
+            normal=normal,
+            t=hit.t,
+            front_face=front_face,
+            material=hit.material,
+            u=hit.u,
+            v=hit.v,
+        )
 
 
 @dataclass(slots=True)
@@ -135,9 +198,10 @@ class Box(Hittable):
 
 
 class Scene(Hittable):
-    def __init__(self, objects: Iterable[Hittable], ambient: glm.vec3) -> None:
+    def __init__(self, objects: Iterable[Hittable], ambient: glm.vec3, infinite_light: glm.vec3 | None = None) -> None:
         self.objects = list(objects)
         self.ambient = ambient
+        self.infinite_light = infinite_light if infinite_light is not None else vec3(0.0, 0.0, 0.0)
 
     def hit(self, ray: Ray, t_min: float, t_max: float) -> Optional[HitRecord]:
         closest = t_max
@@ -179,14 +243,14 @@ class AreaLight:
         return dist2 / (cos_light * self.area)
 
 
-def build_cornell_box() -> tuple[Scene, AreaLight, list[Hittable]]:
+def build_cornell_box(use_infinite_light: bool = False, render_step: int | None = None) -> tuple[Scene, AreaLight, list[Hittable]]:
     from materials import EmissiveMaterial, LambertianMaterial, MicrofacetMaterial
 
     white = LambertianMaterial(vec3(0.73, 0.73, 0.73))
     red = LambertianMaterial(vec3(0.65, 0.05, 0.05))
     green = LambertianMaterial(vec3(0.12, 0.45, 0.15))
-    metal_plastic = MicrofacetMaterial(base_color=vec3(0.82, 0.79, 0.75), metallic=0.85, roughness=0.2)
-    plastic = MicrofacetMaterial(base_color=vec3(0.18, 0.35, 0.7), metallic=0.0, roughness=0.55)
+    metal_plastic = MicrofacetMaterial(base_color=vec3(0.86, 0.84, 0.80), metallic=0.10, roughness=0.34)
+    plastic = MicrofacetMaterial(base_color=vec3(0.88, 0.86, 0.82), metallic=0.0, roughness=0.30)
     light_material = EmissiveMaterial(vec3(15.0, 15.0, 15.0))
 
     floor = Quad(vec3(0.0, 0.0, 0.0), vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), white)
@@ -198,9 +262,18 @@ def build_cornell_box() -> tuple[Scene, AreaLight, list[Hittable]]:
     light_quad = Quad(vec3(0.34, 0.999, 0.34), vec3(0.32, 0.0, 0.0), vec3(0.0, 0.0, 0.32), light_material)
     area_light = AreaLight(quad=light_quad, emission=vec3(15.0, 15.0, 15.0))
 
-    sphere = Sphere(vec3(0.33, 0.22, 0.35), 0.22, metal_plastic)
-    box = Box(vec3(0.62, 0.0, 0.55), vec3(0.88, 0.55, 0.82), plastic)
+    if render_step == 5:
+        sphere_material = LambertianMaterial(vec3(0.72, 0.72, 0.72))
+        sphere_radius = 0.18
+    else:
+        sphere_material = metal_plastic
+        sphere_radius = 0.22
+
+    sphere = Sphere(vec3(0.33, 0.22, 0.35), sphere_radius, sphere_material)
+    local_box = Box(vec3(-0.13, 0.0, -0.135), vec3(0.13, 0.55, 0.135), plastic)
+    box = Translated(RotateY(local_box, 18.0), vec3(0.75, 0.0, 0.685))
 
     objects = [floor, ceiling, back, left_wall, right_wall, light_quad, sphere, box]
-    scene = Scene(objects, ambient=vec3(0.015, 0.015, 0.018))
+    infinite_light = vec3(0.15, 0.15, 0.17) if use_infinite_light else vec3(0.0, 0.0, 0.0)
+    scene = Scene(objects, ambient=vec3(0.015, 0.015, 0.018), infinite_light=infinite_light)
     return scene, area_light, [sphere, box]

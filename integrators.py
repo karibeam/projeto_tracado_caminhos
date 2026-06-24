@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+import sys
 from pathlib import Path
 
 import glm
@@ -10,7 +11,13 @@ from PIL import Image, ImageFilter
 from camera import Camera
 from materials import Material
 from scene import AreaLight, HitRecord, Ray, Scene, build_cornell_box
-from utils import EPSILON, balance_heuristic, clamp, luminance, ray_color_to_rgb, reflect, vec3
+from utils import EPSILON, balance_heuristic, clamp, luminance, power_heuristic, ray_color_to_rgb, reflect, vec3
+
+
+def _mis_weight(pdf_a: float, pdf_b: float, step: int) -> float:
+    if step >= 6:
+        return power_heuristic(pdf_a, pdf_b)
+    return balance_heuristic(pdf_a, pdf_b)
 
 
 def _visible(scene: Scene, origin: glm.vec3, target: glm.vec3) -> bool:
@@ -29,6 +36,7 @@ def _sample_light_contribution(
     hit: HitRecord,
     incoming: glm.vec3,
     rng: random.Random,
+    step: int,
 ) -> glm.vec3:
     target, light_normal, pdf_area, emission = light.sample(rng)
     direction = target - hit.p
@@ -46,11 +54,26 @@ def _sample_light_contribution(
 
     pdf_light = light.pdf_from(hit.p, target)
     pdf_bsdf = hit.material.pdf(-incoming, direction, hit.normal)
-    weight = balance_heuristic(pdf_light, pdf_bsdf)
+    weight = _mis_weight(pdf_light, pdf_bsdf, step)
     if pdf_light <= 0.0:
         return vec3(0.0, 0.0, 0.0)
     brdf = hit.material.eval(-incoming, direction, hit.normal)
     return emission * brdf * cos_surface * weight / pdf_light
+
+
+def _sample_direct_lighting(
+    scene: Scene,
+    light: AreaLight,
+    hit: HitRecord,
+    incoming: glm.vec3,
+    rng: random.Random,
+    step: int,
+) -> glm.vec3:
+    samples = 4 if step >= 6 else 1
+    acc = vec3(0.0, 0.0, 0.0)
+    for _ in range(samples):
+        acc += _sample_light_contribution(scene, light, hit, incoming, rng, step)
+    return acc / float(samples)
 
 
 def _forced_light_closure(
@@ -98,7 +121,7 @@ def _trace_path(
     for bounce in range(max(1, d_max + 3)):
         hit = scene.hit(current_ray, EPSILON, float("inf"))
         if hit is None:
-            radiance += throughput * scene.ambient
+            radiance += throughput * (scene.ambient + scene.infinite_light)
             break
 
         emitted = hit.material.emitted(hit, -current_ray.direction)
@@ -106,14 +129,14 @@ def _trace_path(
             if step >= 3 and last_vertex is not None and not last_specular:
                 to_light = glm.normalize(hit.p - last_vertex.p)
                 light_pdf = light.pdf_from(last_vertex.p, hit.p)
-                weight = balance_heuristic(last_pdf, light_pdf)
+                weight = _mis_weight(last_pdf, light_pdf, step)
                 radiance += throughput * emitted * weight
             else:
                 radiance += throughput * emitted
             break
 
         if step >= 3:
-            radiance += throughput * _sample_light_contribution(scene, light, hit, current_ray.direction, rng)
+            radiance += throughput * _sample_direct_lighting(scene, light, hit, current_ray.direction, rng, step)
         if step >= 5:
             radiance += throughput * _bidirectional_probe(scene, light, hit, current_ray.direction, rng)
 
@@ -143,6 +166,8 @@ def _trace_path(
         cos_term = max(0.0, glm.dot(hit.normal, outgoing))
         brdf = hit.material.eval(-current_ray.direction, outgoing, hit.normal)
         throughput *= brdf * cos_term / sample.pdf
+        if step >= 6:
+            throughput = glm.clamp(throughput, vec3(0.0, 0.0, 0.0), vec3(12.0, 12.0, 12.0))
         current_ray = Ray(hit.p + hit.normal * EPSILON, outgoing)
         last_vertex = hit
         last_pdf = sample.pdf
@@ -168,7 +193,7 @@ def _bidirectional_probe(
         return vec3(0.0, 0.0, 0.0)
     pdf_light = light.pdf_from(hit.p, target)
     pdf_bsdf = hit.material.pdf(-incoming, direction, hit.normal)
-    weight = balance_heuristic(pdf_light, pdf_bsdf)
+    weight = _mis_weight(pdf_light, pdf_bsdf, 6)
     brdf = hit.material.eval(-incoming, direction, hit.normal)
     return emission * brdf * cos_surface * weight / max(pdf_light, 1e-8)
 
@@ -193,6 +218,11 @@ def _render(
 
     pixels: list[tuple[int, int, int]] = []
     for j in range(height - 1, -1, -1):
+        completed_rows = height - j
+        progress = int((completed_rows / max(1, height)) * 100)
+        if completed_rows == 1 or completed_rows == height or progress % 5 == 0:
+            sys.stdout.write(f"\rRender {progress:3d}% ({completed_rows}/{height} linhas)")
+            sys.stdout.flush()
         for i in range(width):
             rng = random.Random((step * 1000003) + j * 1009 + i)
             color = vec3(0.0, 0.0, 0.0)
@@ -203,6 +233,9 @@ def _render(
                 color += _trace_path(scene, light, ray, rng, d_max=d_max, step=step)
             pixels.append(ray_color_to_rgb(color, spp))
 
+    sys.stdout.write("\rRender 100% (concluído)\n")
+    sys.stdout.flush()
+
     image = Image.new("RGB", (width, height))
     image.putdata(pixels)
     if use_filter:
@@ -211,13 +244,13 @@ def _render(
 
 
 def render_step(step: int, width: int, height: int, spp: int, d_max: int, use_filter: bool) -> Image.Image:
-    scene, light, _ = build_cornell_box()
-    return _render(scene, light, width, height, spp, d_max, step, use_filter)
+    scene, light, _ = build_cornell_box(render_step=step)
+    render_spp = min(spp, 32) if step == 5 else spp
+    return _render(scene, light, width, height, render_spp, d_max, step, use_filter)
 
 
 def render_all_steps(width: int, height: int, spp: int, d_max: int, use_filter: bool) -> dict[int, Image.Image]:
-    scene, light, _ = build_cornell_box()
     images: dict[int, Image.Image] = {}
-    for step in range(1, 6):
-        images[step] = _render(scene, light, width, height, spp, d_max, step, use_filter)
+    for step in range(1, 7):
+        images[step] = render_step(step, width, height, spp, d_max, use_filter)
     return images
