@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import multiprocessing as mp
 import random
 import sys
+import time
 from pathlib import Path
 
 import glm
@@ -20,6 +22,7 @@ from utils import (
     power_heuristic,
     random_cosine_direction,
     ray_color_to_rgb,
+    ray_color_to_rgb_hq,
     reflect,
     to_world,
     vec3,
@@ -81,7 +84,7 @@ def _sample_direct_lighting(
     rng: random.Random,
     step: int,
 ) -> glm.vec3:
-    samples = 4 if step >= 6 else 1
+    samples = 8 if step >= 7 else (4 if step >= 6 else 1)
     acc = vec3(0.0, 0.0, 0.0)
     for _ in range(samples):
         acc += _sample_light_contribution(scene, light, hit, incoming, rng, step)
@@ -190,7 +193,7 @@ def _trace_path(
             # Conexão bidirecional entre o vértice da câmera `hit` e o vértice da luz `light_vertex`
             w_conn = light_vertex.p - hit.p
             dist2 = glm.dot(w_conn, w_conn)
-            if dist2 > 0.0:
+            if dist2 > 1e-4:  # distância mínima ~1cm para evitar G→∞ (fonte de fireflies)
                 distance = math.sqrt(dist2)
                 w_conn_normalized = w_conn / distance
                 if _visible(scene, hit.p, light_vertex.p):
@@ -199,7 +202,7 @@ def _trace_path(
                     if cos_camera > 0.0 and cos_light > 0.0:
                         brdf_camera = hit.material.eval(-current_ray.direction, w_conn_normalized, hit.normal)
                         brdf_light = light_vertex.material.eval(light_vertex.incoming, -w_conn_normalized, light_vertex.normal)
-                        G = (cos_camera * cos_light) / dist2
+                        G = min((cos_camera * cos_light) / dist2, 25.0)  # clamp G para suprimir fireflies
                         connection_radiance = throughput * brdf_camera * G * brdf_light * light_vertex.throughput * 0.5
                         radiance += connection_radiance
 
@@ -229,7 +232,9 @@ def _trace_path(
         cos_term = max(0.0, glm.dot(hit.normal, outgoing))
         brdf = hit.material.eval(-current_ray.direction, outgoing, hit.normal)
         throughput *= brdf * cos_term / sample.pdf
-        if step >= 6:
+        if step >= 7:
+            throughput = glm.clamp(throughput, vec3(0.0, 0.0, 0.0), vec3(8.0, 8.0, 8.0))
+        elif step >= 6:
             throughput = glm.clamp(throughput, vec3(0.0, 0.0, 0.0), vec3(12.0, 12.0, 12.0))
         current_ray = Ray(hit.p + hit.normal * EPSILON, outgoing)
         last_vertex = hit
@@ -237,6 +242,110 @@ def _trace_path(
         last_specular = False
 
     return radiance
+
+
+def _render_chunk_worker(args: tuple) -> list:
+    """Worker para renderização paralela de um bloco de linhas (multiprocessing)."""
+    j_start, j_end, width, height, spp, d_max, step = args
+    scene, light, _ = build_cornell_box(render_step=step)
+    camera = Camera.look_at(
+        lookfrom=vec3(0.5, 0.5, -2.2),
+        lookat=vec3(0.5, 0.5, 0.5),
+        vup=vec3(0.0, 1.0, 0.0),
+        vfov=40.0,
+        aspect_ratio=width / height,
+    )
+    _MAX_SAMPLE_LUM = 20.0  # clamp por amostra: suprime fireflies residuais
+    rows_data = []
+    for j in range(j_start, j_end):
+        row_pixels = []
+        for i in range(width):
+            rng = random.Random((step * 1000003) + j * 1009 + i)
+            color_acc = vec3(0.0, 0.0, 0.0)
+            for _ in range(spp):
+                u = (i + rng.random()) / max(1, width - 1)
+                v = (j + rng.random()) / max(1, height - 1)
+                ray = camera.get_ray(u, v)
+                lv = _sample_light_path(scene, light, rng)
+                sample = _trace_path(scene, light, ray, rng, d_max=d_max, step=step, light_vertex=lv)
+                lum = luminance(sample)
+                if lum > _MAX_SAMPLE_LUM:
+                    sample = sample * (_MAX_SAMPLE_LUM / lum)
+                color_acc += sample
+            row_pixels.append(ray_color_to_rgb_hq(color_acc, spp))
+        rows_data.append((j, row_pixels))
+    return rows_data
+
+
+def _render_passo7(
+    width: int,
+    height: int,
+    spp: int,
+    d_max: int,
+    use_filter: bool,
+    label: str = "",
+) -> Image.Image:
+    """Render final de alta qualidade com todas as técnicas e progresso detalhado no terminal."""
+    n_workers = max(1, mp.cpu_count())
+    chunk_size = max(1, height // max(32, n_workers * 4))
+
+    chunks = [
+        (j_start, min(j_start + chunk_size, height), width, height, spp, d_max, 7)
+        for j_start in range(0, height, chunk_size)
+    ]
+
+    tag = f" [{label}]" if label else ""
+    print(f"\n{'='*64}")
+    print(f"  PASSO 7{tag} — Render Final de Alta Qualidade")
+    print(f"  Resolucao: {width}x{height} | SPP: {spp} | d_max: {d_max}")
+    print(f"  Processos: {n_workers} | Chunks: {len(chunks)}")
+    print(f"  Tecnicas: MIS Power Heuristic + Cook-Torrance GGX + Roleta")
+    print(f"           Russa + BDPT + 8 amostras directas + ACES TM")
+    print(f"{'='*64}")
+
+    pixels_by_row: dict[int, list] = {}
+    completed_rows = 0
+    start_time = time.time()
+
+    with mp.Pool(n_workers) as pool:
+        for rows_data in pool.imap_unordered(_render_chunk_worker, chunks):
+            for j, row_pixels in rows_data:
+                pixels_by_row[j] = row_pixels
+            completed_rows += len(rows_data)
+
+            progress = completed_rows / height
+            elapsed = time.time() - start_time
+            rate = completed_rows / elapsed if elapsed > 0 else 0.001
+            eta = (height - completed_rows) / rate
+
+            bar_w = 36
+            filled = int(bar_w * progress)
+            bar = "█" * filled + "░" * (bar_w - filled)
+            sys.stdout.write(
+                f"\r  [{bar}] {progress * 100:5.1f}%"
+                f"  {elapsed:6.1f}s"
+                f"  ETA {max(0.0, eta):5.1f}s"
+                f"  {rate:5.1f} lin/s"
+            )
+            sys.stdout.flush()
+
+    elapsed = time.time() - start_time
+    total_rays = height * width * spp
+    sys.stdout.write(
+        f"\n  Concluido em {elapsed:.1f}s"
+        f"  ({total_rays / elapsed / 1e6:.2f}M raios/s)\n"
+    )
+    print(f"{'='*64}")
+
+    pixels = []
+    for j in range(height - 1, -1, -1):
+        pixels.extend(pixels_by_row[j])
+
+    image = Image.new("RGB", (width, height))
+    image.putdata(pixels)
+    if use_filter:
+        image = image.filter(ImageFilter.MedianFilter(size=3))
+    return image
 
 
 def _render(
@@ -272,7 +381,12 @@ def _render(
                 v = (j + rng.random()) / max(1, height - 1)
                 ray = camera.get_ray(u, v)
                 light_vertex = _sample_light_path(scene, light, rng) if step >= 5 else None
-                color += _trace_path(scene, light, ray, rng, d_max=d_max, step=step, light_vertex=light_vertex)
+                sample = _trace_path(scene, light, ray, rng, d_max=d_max, step=step, light_vertex=light_vertex)
+                if step >= 5:
+                    lum = luminance(sample)
+                    if lum > 20.0:
+                        sample = sample * (20.0 / lum)
+                color += sample
             pixels.append(ray_color_to_rgb(color, spp))
 
     sys.stdout.write("\rRender 100% (concluído)\n")
@@ -281,14 +395,15 @@ def _render(
     image = Image.new("RGB", (width, height))
     image.putdata(pixels)
     if use_filter:
-        image = image.filter(ImageFilter.GaussianBlur(radius=0.4))
+        image = image.filter(ImageFilter.MedianFilter(size=3))
     return image
 
 
-def render_step(step: int, width: int, height: int, spp: int, d_max: int, use_filter: bool) -> Image.Image:
+def render_step(step: int, width: int, height: int, spp: int, d_max: int, use_filter: bool, label: str = "") -> Image.Image:
+    if step == 7:
+        return _render_passo7(width, height, spp, d_max, use_filter, label=label)
     scene, light, _ = build_cornell_box(render_step=step)
-    render_spp = spp
-    return _render(scene, light, width, height, render_spp, d_max, step, use_filter)
+    return _render(scene, light, width, height, spp, d_max, step, use_filter)
 
 
 def render_all_steps(width: int, height: int, spp: int, d_max: int, use_filter: bool) -> dict[int, Image.Image]:

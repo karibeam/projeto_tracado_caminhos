@@ -266,15 +266,25 @@ def build_cornell_box(use_infinite_light: bool = False, render_step: int | None 
         sphere_material = Material(color=glm.vec3(0.9, 0.9, 0.9), specular=0.9,
                                    shininess=100.0, reflectivity=0.95)
         sphere_radius = 0.12
+        box_material = plastic
+    elif render_step == 7:
+        # Esfera dourada metálica: reflecte vividamente as paredes vermelha e verde
+        sphere_material = MicrofacetMaterial(base_color=vec3(1.0, 0.78, 0.34), metallic=0.95, roughness=0.05)
+        sphere_radius = 0.20
+        # Caixa branca suave: mostra color bleeding por iluminação indirecta difusa
+        box_material = MicrofacetMaterial(base_color=vec3(0.93, 0.93, 0.93), metallic=0.0, roughness=0.15)
     else:
         sphere_material = metal_plastic
         sphere_radius = 0.22
+        box_material = plastic
 
     sphere = Sphere(vec3(0.33, sphere_radius, 0.35), sphere_radius, sphere_material)
-    local_box = Box(vec3(-0.13, 0.0, -0.135), vec3(0.13, 0.55, 0.135), plastic)
+    local_box = Box(vec3(-0.13, 0.0, -0.135), vec3(0.13, 0.55, 0.135), box_material)
     box = Translated(RotateY(local_box, 18.0), vec3(0.75, 0.0, 0.685))
 
     objects = [floor, ceiling, back, left_wall, right_wall, light_quad, sphere, box]
     infinite_light = vec3(0.15, 0.15, 0.17) if use_infinite_light else vec3(0.0, 0.0, 0.0)
-    scene = Scene(objects, ambient=vec3(0.015, 0.015, 0.018), infinite_light=infinite_light)
+    # Passo 7: sem luz ambiente artificial — a iluminação indirecta (color bleeding) domina
+    ambient = vec3(0.0, 0.0, 0.0) if render_step == 7 else vec3(0.015, 0.015, 0.018)
+    scene = Scene(objects, ambient=ambient, infinite_light=infinite_light)
     return scene, area_light, [sphere, box]

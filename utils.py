@@ -138,3 +138,18 @@ def ray_color_to_rgb(color: glm.vec3, spp: int) -> tuple[int, int, int]:
         int(255.999 * clamped.y),
         int(255.999 * clamped.z),
     )
+
+
+def aces_tone_map(x: float) -> float:
+    x = max(0.0, x)
+    return min(1.0, (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14))
+
+
+def ray_color_to_rgb_hq(color: glm.vec3, spp: int) -> tuple[int, int, int]:
+    """ACES filmic tone mapping + gamma 2.2 para o render final de alta qualidade."""
+    scale = 1.0 / max(1, spp)
+    gamma = 1.0 / 2.2
+    r = max(0.0, min(1.0, aces_tone_map(color.x * scale) ** gamma))
+    g = max(0.0, min(1.0, aces_tone_map(color.y * scale) ** gamma))
+    b = max(0.0, min(1.0, aces_tone_map(color.z * scale) ** gamma))
+    return (int(255.999 * r), int(255.999 * g), int(255.999 * b))
