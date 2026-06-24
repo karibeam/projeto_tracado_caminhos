@@ -32,19 +32,49 @@ class BsdfSample:
 
 
 class Material:
+    def __init__(
+        self,
+        color: glm.vec3 | None = None,
+        specular: float = 0.0,
+        shininess: float = 0.0,
+        reflectivity: float = 0.0,
+    ) -> None:
+        if color is not None:
+            self._roughness = math.sqrt(2.0 / (shininess + 2.0)) if shininess > 0.0 else 1.0
+            self._metallic = reflectivity
+            self._microfacet = MicrofacetMaterial(
+                base_color=color,
+                metallic=self._metallic,
+                roughness=self._roughness,
+            )
+        else:
+            self._microfacet = None
+
     def emitted(self, hit: HitRecord, outgoing: glm.vec3) -> glm.vec3:
         return vec3(0.0, 0.0, 0.0)
 
     def sample(self, incoming: glm.vec3, normal: glm.vec3, rng: random.Random) -> BsdfSample:
+        microfacet = getattr(self, "_microfacet", None)
+        if microfacet is not None:
+            return microfacet.sample(incoming, normal, rng)
         raise NotImplementedError
 
     def eval(self, incoming: glm.vec3, outgoing: glm.vec3, normal: glm.vec3) -> glm.vec3:
+        microfacet = getattr(self, "_microfacet", None)
+        if microfacet is not None:
+            return microfacet.eval(incoming, outgoing, normal)
         raise NotImplementedError
 
     def pdf(self, incoming: glm.vec3, outgoing: glm.vec3, normal: glm.vec3) -> float:
+        microfacet = getattr(self, "_microfacet", None)
+        if microfacet is not None:
+            return microfacet.pdf(incoming, outgoing, normal)
         raise NotImplementedError
 
     def is_specular(self) -> bool:
+        microfacet = getattr(self, "_microfacet", None)
+        if microfacet is not None:
+            return microfacet.is_specular()
         return False
 
 

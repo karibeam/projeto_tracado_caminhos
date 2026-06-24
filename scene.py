@@ -244,7 +244,7 @@ class AreaLight:
 
 
 def build_cornell_box(use_infinite_light: bool = False, render_step: int | None = None) -> tuple[Scene, AreaLight, list[Hittable]]:
-    from materials import EmissiveMaterial, LambertianMaterial, MicrofacetMaterial
+    from materials import EmissiveMaterial, LambertianMaterial, Material, MicrofacetMaterial, MirrorMaterial
 
     white = LambertianMaterial(vec3(0.73, 0.73, 0.73))
     red = LambertianMaterial(vec3(0.65, 0.05, 0.05))
@@ -263,13 +263,14 @@ def build_cornell_box(use_infinite_light: bool = False, render_step: int | None 
     area_light = AreaLight(quad=light_quad, emission=vec3(15.0, 15.0, 15.0))
 
     if render_step == 5:
-        sphere_material = LambertianMaterial(vec3(0.72, 0.72, 0.72))
-        sphere_radius = 0.18
+        sphere_material = Material(color=glm.vec3(0.9, 0.9, 0.9), specular=0.9,
+                                   shininess=100.0, reflectivity=0.95)
+        sphere_radius = 0.12
     else:
         sphere_material = metal_plastic
         sphere_radius = 0.22
 
-    sphere = Sphere(vec3(0.33, 0.22, 0.35), sphere_radius, sphere_material)
+    sphere = Sphere(vec3(0.33, sphere_radius, 0.35), sphere_radius, sphere_material)
     local_box = Box(vec3(-0.13, 0.0, -0.135), vec3(0.13, 0.55, 0.135), plastic)
     box = Translated(RotateY(local_box, 18.0), vec3(0.75, 0.0, 0.685))
 

@@ -13,13 +13,14 @@ OUTPUT_FILENAMES = {
     "3.1": "passo3_1_teste_mis_microfacets.png",
     "4": "passo4_microfacets.png",
     "5": "passo5_bdpt.png",
+    "5.1": "passo5_1_realista.png",
     "6": "passo6_luz_infinita_teste.png",
 }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Motor de Renderização Path Tracing (Cornell Box)")
-    parser.add_argument("--step", type=str, choices=["1", "2", "3", "3.1", "4", "5", "6"], default=None)
+    parser.add_argument("--step", type=str, choices=["1", "2", "3", "3.1", "4", "5", "5.1", "6"], default=None)
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--spp", type=int, default=25)
@@ -36,13 +37,14 @@ def main() -> None:
     steps = [args.step] if args.step else ["1", "2", "3", "4", "5", "6"]
     for step in steps:
         print(f"A executar o Passo {step}...")
-        render_spp = 64 if step == "3.1" else args.spp
-        render_d_max = 4 if step == "3.1" else args.d_max
+        render_spp = 64 if step == "3.1" else (128 if step == "5.1" else args.spp)
+        render_d_max = 4 if step == "3.1" else (6 if step == "5.1" else args.d_max)
+        render_use_filter = True if step == "5.1" else args.use_filter
         if step == "6":
             render_spp = max(render_spp, 96)
             render_d_max = max(render_d_max, 6)
-        render_step_id = 3 if step == "3.1" else int(step)
-        image = render_step(render_step_id, args.width, args.height, render_spp, render_d_max, args.use_filter)
+        render_step_id = 3 if step == "3.1" else (5 if step == "5.1" else int(step))
+        image = render_step(render_step_id, args.width, args.height, render_spp, render_d_max, render_use_filter)
         target = output_dir / OUTPUT_FILENAMES[step]
         image.save(target)
         print(f"Imagem guardada em {target}")
